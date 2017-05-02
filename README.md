@@ -1,3 +1,14 @@
+# Disclaimer
+
+This is a fork of the Ruuvi Collector by scrin. 
+
+Main changes:
+* Use InfluxDB driver from Maven.
+* Added Ant script to SCP the built result uber-jar to the Pi.
+* Configuration file always required, and loaded from working dir not from jar dir.
+* Simplify the code to do what it did before but easier to read for someone just looking at how the RuuviCollector works. Ok it's subjective but whatever.
+* For updated versions and new protocol versions, scrin is the place to go. I just put this here if someone finds it useful somehow. Updates by me not very likely or at least not frequent.
+
 # RuuviCollector
 
 RuuviCollector is an application for collecting sensor measurements from RuuviTags and storing them to InfluxDB. For more about how and for what this is used for, see [this](https://f.ruuvi.com/t/collecting-ruuvitag-measurements-and-displaying-them-with-grafana/267) post.

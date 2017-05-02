@@ -1,0 +1,20 @@
+<project name="MyProject" default="copy-jar" basedir=".">
+    <description>
+        Copies the generated Maven jar file to remote rpi directory to run.
+    </description>
+
+    <!-- set global properties for this build. overridge these with build properties as needed. -->
+    <property name="user" value="pi"/>
+    <property name="pw" value="raspberry"/>
+    <property name="desthost" value="ruuvipie"/>
+    <property name="destdir" value="/home/pi/ruuvicollector"/>
+
+    <target name="copy-jar" description="copy the maven jar file to remote rpi dir">
+        <echo message="Copying file with user=${user}, pw=${user}, desthost=${desthost}, destdir=${destdir}"/>
+        <scp trust="true" todir="${user}:${pw}@${desthost}:${destdir}">
+            <fileset dir="target">
+                <include name="ruuvi-collector*.jar"/>
+            </fileset>
+        </scp>
+    </target>
+</project>

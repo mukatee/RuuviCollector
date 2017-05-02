@@ -1,136 +1,60 @@
 package fi.tkgwf.ruuvi;
 
-import fi.tkgwf.ruuvi.db.InfluxDBConnection;
-import fi.tkgwf.ruuvi.handler.BeaconHandler;
-import fi.tkgwf.ruuvi.handler.impl.DataFormatV2;
+import fi.tkgwf.ruuvi.handler.impl.DataFormatV2V4;
 import fi.tkgwf.ruuvi.handler.impl.DataFormatV3;
-import fi.tkgwf.ruuvi.handler.impl.DataFormatV4;
+import org.apache.log4j.Logger;
+import org.influxdb.InfluxDB;
+import org.influxdb.InfluxDBFactory;
+
 import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.net.URISyntaxException;
-import java.util.Enumeration;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Properties;
-import org.apache.log4j.Logger;
+import java.util.concurrent.TimeUnit;
 
 public class Main {
-
+    public static InfluxDB influx;
     private static final Logger LOG = Logger.getLogger(Main.class);
+    private static final DataFormatV2V4 format2 = new DataFormatV2V4(false);
+    private static final DataFormatV3 format3 = new DataFormatV3();
+    private static final DataFormatV2V4 format4 = new DataFormatV2V4(true);
 
-    private final List<BeaconHandler> beaconHandlers = new LinkedList<>();
-
-    public void initializeHandlers(long influxUpdateLimit) {
-        beaconHandlers.add(new DataFormatV2(influxUpdateLimit));
-        beaconHandlers.add(new DataFormatV3(influxUpdateLimit));
-        beaconHandlers.add(new DataFormatV4(influxUpdateLimit));
-    }
-
-    public static void main(String[] args) {
-        // Defaults..
-        String influxUrlBase = "http://localhost:8086";
-        String influxDatabase = "ruuvi";
-        String influxUser = "ruuvi";
-        String influxPassword = "ruuvi";
-        long influxUpdateLimit = 9900;
-
-        // Read config..
-        try {
-            File jarLocation = new File(Main.class.getProtectionDomain().getCodeSource().getLocation().toURI().getPath()).getParentFile();
-            File[] configFiles = jarLocation.listFiles(f -> f.isFile() && f.getName().equals("ruuvi-collector.properties"));
-            if (configFiles == null || configFiles.length == 0) {
-                // look for config files in the parent directory if none found in the current directory, this is useful during development when
-                // RuuviCollector can be run from maven target directory directly while the config file sits in the project root
-                configFiles = jarLocation.getParentFile().listFiles(f -> f.isFile() && f.getName().equals("ruuvi-collector.properties"));
-            }
-            if (configFiles != null && configFiles.length > 0) {
-                LOG.debug("Config: " + configFiles[0]);
-                Properties props = new Properties();
-                props.load(new FileInputStream(configFiles[0]));
-                Enumeration<?> e = props.propertyNames();
-                while (e.hasMoreElements()) {
-                    String key = (String) e.nextElement();
-                    String value = props.getProperty(key);
-                    switch (key) {
-                        case "influxUrlBase":
-                            influxUrlBase = value;
-                            break;
-                        case "influxDatabase":
-                            influxDatabase = value;
-                            break;
-                        case "influxUser":
-                            influxUser = value;
-                            break;
-                        case "influxPassword":
-                            influxPassword = value;
-                            break;
-                        case "influxUpdateLimit":
-                            try {
-                                influxUpdateLimit = Long.parseLong(value);
-                            } catch (NumberFormatException ex) {
-                                LOG.warn("Malformed number format for influxUpdateLimit: '" + value + '\'');
-                            }
-                            break;
-                    }
-                }
-            }
-        } catch (URISyntaxException | IOException ex) {
-            LOG.warn("Failed to read configuration, using default values...", ex);
-        }
-        String influxUrl = String.format("%s/write?db=%s&u=%s&p=%s", influxUrlBase, influxDatabase, influxUser, influxPassword);
-
-        // Start the collector..
+    public static void main(String[] args) throws Exception {
+        influx = InfluxDBFactory.connect(Config.INFLUX_URL, Config.INFLUX_USER, Config.INFLUX_PASS);
+        influx.createDatabase(Config.INFLUX_DATABASENAME);
+        // Flush every 2000 Points, at least every 1s
+        influx.enableBatch(2000, 1, TimeUnit.SECONDS);
         Main m = new Main();
-        m.initializeHandlers(influxUpdateLimit);
-        if (!m.run(influxUrl)) {
-            System.exit(1);
-        }
+        m.run();
     }
 
     private BufferedReader startHciListeners() throws IOException {
         Process hcitool = new ProcessBuilder("hcitool", "lescan", "--duplicates").start();
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> hcitool.destroyForcibly()));
+        Runtime.getRuntime().addShutdownHook(new Thread(hcitool::destroyForcibly));
         Process hcidump = new ProcessBuilder("hcidump", "--raw").start();
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> hcidump.destroyForcibly()));
+        Runtime.getRuntime().addShutdownHook(new Thread(hcidump::destroyForcibly));
         return new BufferedReader(new InputStreamReader(hcidump.getInputStream()));
     }
 
-    private boolean run(String influxUrl) {
-        InfluxDBConnection influx = new InfluxDBConnection(influxUrl);
-        BufferedReader reader;
-        try {
-            reader = startHciListeners();
-        } catch (IOException ex) {
-            LOG.error("Failed to start hci processes", ex);
-            return false;
-        }
+    private void run() throws IOException {
+        BufferedReader reader = startHciListeners();
         LOG.info("BLE listener started successfully, waiting for data... \nIf you don't get any data, check that you are able to run 'hcitool lescan --duplicates' and 'hcidump --raw' without issues");
         boolean dataReceived = false;
-        try {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (!dataReceived) {
-                    LOG.info("Successfully reading data from hcidump");
-                    dataReceived = true;
-                }
-                try {
-                    String finalLine = line; // lambdas require this to be effectively final
-                    beaconHandlers.stream()
-                            .map(handler -> handler.read(finalLine))
-                            .filter(measurement -> measurement != null)
-                            .forEach(influx::post);
-                } catch (Exception ex) {
-                    LOG.warn("Uncaught exception while handling measurements", ex);
-                    beaconHandlers.forEach(BeaconHandler::reset);
-                }
+        String line;
+        while ((line = reader.readLine()) != null) {
+            if (!dataReceived) {
+                LOG.info("Successfully reading data from hcidump");
+                dataReceived = true;
             }
-        } catch (IOException ex) {
-            LOG.error("Uncaught exception while reading measurements", ex);
-            return false;
+            try {
+                format2.read(line);
+                format3.read(line);
+                format4.read(line);
+            } catch (Exception ex) {
+                LOG.warn("Uncaught exception while handling measurements", ex);
+                format2.reset();
+                format3.reset();
+                format4.reset();
+            }
         }
-        return true;
     }
 }

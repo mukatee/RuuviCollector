@@ -1,56 +1,49 @@
 package fi.tkgwf.ruuvi.handler.impl;
 
+import fi.tkgwf.ruuvi.Config;
+import fi.tkgwf.ruuvi.Main;
 import fi.tkgwf.ruuvi.utils.RuuviUtils;
-import fi.tkgwf.ruuvi.bean.InfluxDBData;
-import fi.tkgwf.ruuvi.handler.BeaconHandler;
+import org.influxdb.dto.Point;
+
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
-public class DataFormatV3 implements BeaconHandler {
-
+public class DataFormatV3 {
     // For some reason the latest sensortag data format has four null bytes at the end, changing the length of the raw packer (third byte is the length)
     private static final String OLDER_SENSORTAG_BEGINS = "> 04 3E 21 02 01 03 01 ";
     private static final String SENSORTAG_BEGINS = "> 04 3E 25 02 01 03 01 ";
-    /**
-     * Contains the MAC address as key, and the timestamp of last sent update as
-     * value
-     */
-    private final Map<String, Long> updatedMacs;
-    private final long updateLimit;
     private String latestMac = null;
 
-    public DataFormatV3(long updateLimit) {
-        updatedMacs = new HashMap<>();
-        this.updateLimit = updateLimit;
+    public DataFormatV3() {
     }
 
-    @Override
-    public InfluxDBData read(String rawLine) {
-        if (latestMac == null && (rawLine.startsWith(SENSORTAG_BEGINS) || rawLine.startsWith(OLDER_SENSORTAG_BEGINS))) { // line with Ruuvi MAC
+    public void read(String rawLine) {
+        if (latestMac == null && (rawLine.startsWith(SENSORTAG_BEGINS) || rawLine.startsWith(OLDER_SENSORTAG_BEGINS))) {
+            // line with Ruuvi MAC
             latestMac = RuuviUtils.getMacFromLine(rawLine.substring(SENSORTAG_BEGINS.length()));
         } else if (latestMac != null) {
             try {
-                if (shouldUpdate(latestMac)) {
-                    return handleMeasurement(latestMac, rawLine);
-                }
+                handleMeasurement(latestMac, rawLine);
+                //TODO: log errors
             } finally {
                 latestMac = null;
             }
+        } else {
+            //TODO: log error
         }
-        return null;
     }
 
-    @Override
     public void reset() {
         latestMac = null;
     }
 
-    private InfluxDBData handleMeasurement(String mac, String rawLine) {
-        rawLine = rawLine.trim(); // trim whitespace
-        rawLine = rawLine.substring(rawLine.indexOf(' ') + 1, rawLine.lastIndexOf(' ')); // discard first and last byte
+    private void handleMeasurement(String mac, String rawLine) {
+        rawLine = rawLine.trim();
+        rawLine = rawLine.substring(rawLine.indexOf(' ') + 1, rawLine.lastIndexOf(' ')); // discard first and last byte (TODO: why?)
         byte[] data = RuuviUtils.hexToBytes(rawLine);
         if (data[0] != 3) {
-            return null; // unknown type
+            return; // unknown type
         }
         String protocolVersion = String.valueOf(data[0]);
 
@@ -77,24 +70,18 @@ public class DataFormatV3 implements BeaconHandler {
         int battLo = data[13] & 0xFF;
         float battery = (battHi * 256 + battLo) / 1000f;
 
-        InfluxDBData.Builder builder = new InfluxDBData.Builder().mac(mac).protocolVersion(protocolVersion)
-                .measurement("temperature").value(temperature)
-                .measurement("humidity").value(humidity)
-                .measurement("pressure").value(pressure)
-                .measurement("acceleration").tag("axis", "x").value(accelX)
-                .measurement("acceleration").tag("axis", "y").value(accelY)
-                .measurement("acceleration").tag("axis", "z").value(accelZ)
-                .measurement("acceleration").tag("axis", "total").value(accelTotal)
-                .measurement("batteryVoltage").value(battery);
-        return builder.build();
-    }
+        Point point1 = Point.measurement(mac)
+            .time(System.currentTimeMillis(), TimeUnit.MILLISECONDS)
+            .addField("temperature", temperature)
+            .addField("humidity", humidity)
+            .addField("pressure", pressure)
+            .addField("acceleration_x", accelX)
+            .addField("acceleration_y", accelY)
+            .addField("acceleration_z", accelZ)
+            .addField("acceleration_total", accelTotal)
+            .addField("batteryVoltage", battery)
+            .build();
 
-    private boolean shouldUpdate(String mac) {
-        Long lastUpdate = updatedMacs.get(mac);
-        if (lastUpdate == null || lastUpdate + updateLimit < System.currentTimeMillis()) {
-            updatedMacs.put(mac, System.currentTimeMillis());
-            return true;
-        }
-        return false;
+        Main.influx.write(Config.INFLUX_DATABASENAME, "autogen", point1);
     }
 }
